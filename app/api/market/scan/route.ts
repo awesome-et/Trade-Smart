@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerSideClient } from '@/lib/auth-server';
+import { supabase } from '@/lib/supabase';
 import { fetchMarketData, calculateTechnicalIndicators, getStockList } from '@/lib/services/market-data';
 import { evaluateStrategy } from '@/lib/services/strategy-evaluator';
 import { generateSignals } from '@/lib/services/signal-generator';
 import { getStrategy } from '@/lib/services/strategy-manager';
 
 export async function POST(request: NextRequest) {
-  const supabase = await createServerSideClient();
-
   try {
     const body = await request.json();
     const { strategy_id } = body;
@@ -29,10 +27,12 @@ export async function POST(request: NextRequest) {
 
     const startTime = Date.now();
 
+    // Fetch market data
     const symbols = getStockList();
     const quotes = await fetchMarketData(symbols);
     const marketData = calculateTechnicalIndicators(quotes);
 
+    // Create market scan record
     const { data: scanData, error: scanError } = await supabase
       .from('market_scans')
       .insert([
@@ -49,11 +49,14 @@ export async function POST(request: NextRequest) {
     if (scanError) throw scanError;
 
     try {
+      // Evaluate strategy
       const evaluationResults = await evaluateStrategy(strategy, marketData);
+
+      // Generate signals
       const signals = await generateSignals(strategy_id, scanData.id, evaluationResults);
 
+      // Update market scan with results
       const executionTime = Date.now() - startTime;
-
       const { error: updateError } = await supabase
         .from('market_scans')
         .update({
@@ -74,8 +77,8 @@ export async function POST(request: NextRequest) {
           signals,
         },
       });
-
     } catch (error) {
+      // Update market scan as failed
       await supabase
         .from('market_scans')
         .update({
@@ -86,10 +89,8 @@ export async function POST(request: NextRequest) {
 
       throw error;
     }
-
   } catch (error) {
     console.error('Error in market scan:', error);
-
     return NextResponse.json(
       { success: false, error: 'Failed to execute market scan' },
       { status: 500 }
@@ -98,8 +99,6 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const supabase = await createServerSideClient();
-
   try {
     const searchParams = request.nextUrl.searchParams;
     const strategyId = searchParams.get('strategy_id');
@@ -121,10 +120,8 @@ export async function GET(request: NextRequest) {
       success: true,
       data: data || [],
     });
-
   } catch (error) {
     console.error('Error fetching market scans:', error);
-
     return NextResponse.json(
       { success: false, error: 'Failed to fetch market scans' },
       { status: 500 }

@@ -1,16 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerSideClient } from '@/lib/auth-server';
 import { getActiveStrategies } from '@/lib/services/strategy-manager';
 import { fetchMarketData, calculateTechnicalIndicators, getStockList } from '@/lib/services/market-data';
 import { evaluateStrategy } from '@/lib/services/strategy-evaluator';
 import { generateSignals, expireOldSignals } from '@/lib/services/signal-generator';
+import { supabase } from '@/lib/supabase';
 
-export const maxDuration = 60;
+export const maxDuration = 60; // 60 seconds max for cron
 
 export async function GET(request: NextRequest) {
-  const supabase = await createServerSideClient();
-
   try {
+    // Verify the request is from Vercel Cron (optional security check)
     const authHeader = request.headers.get('authorization');
     if (authHeader !== `Bearer ${process.env.CRON_SECRET}` && process.env.CRON_SECRET) {
       return NextResponse.json(
@@ -22,7 +21,9 @@ export async function GET(request: NextRequest) {
     console.log('[v0] Starting market scan cron job');
     const startTime = Date.now();
 
+    // Get all active strategies
     const strategies = await getActiveStrategies();
+    console.log(`[v0] Found ${strategies.length} active strategies`);
 
     if (strategies.length === 0) {
       return NextResponse.json({
@@ -31,17 +32,21 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // Fetch market data once
     const symbols = getStockList();
     const quotes = await fetchMarketData(symbols);
     const marketData = calculateTechnicalIndicators(quotes);
+    console.log(`[v0] Fetched market data for ${symbols.length} symbols`);
 
     let totalSignalsGenerated = 0;
     const scans = [];
 
+    // Run scan for each strategy
     for (const strategy of strategies) {
       try {
         const scanStartTime = Date.now();
 
+        // Create market scan record
         const { data: scanData, error: scanError } = await supabase
           .from('market_scans')
           .insert([
@@ -57,13 +62,15 @@ export async function GET(request: NextRequest) {
 
         if (scanError) throw scanError;
 
+        // Evaluate strategy
         const evaluationResults = await evaluateStrategy(strategy, marketData);
-        const signals = await generateSignals(strategy.id, scanData.id, evaluationResults);
 
+        // Generate signals
+        const signals = await generateSignals(strategy.id, scanData.id, evaluationResults);
         totalSignalsGenerated += signals.length;
 
+        // Update market scan with results
         const executionTime = Date.now() - scanStartTime;
-
         await supabase
           .from('market_scans')
           .update({
@@ -79,13 +86,19 @@ export async function GET(request: NextRequest) {
           execution_time_ms: executionTime,
         });
 
+        console.log(`[v0] Strategy ${strategy.name}: ${signals.length} signals generated`);
       } catch (error) {
-        console.error(`Error scanning strategy ${strategy.id}:`, error);
+        console.error(`[v0] Error scanning strategy ${strategy.id}:`, error);
+        // Continue with next strategy
       }
     }
 
+    // Expire old signals
     const expiredCount = await expireOldSignals(24);
+    console.log(`[v0] Expired ${expiredCount} old signals`);
+
     const totalTime = Date.now() - startTime;
+    console.log(`[v0] Cron job completed in ${totalTime}ms`);
 
     return NextResponse.json({
       success: true,
@@ -97,12 +110,14 @@ export async function GET(request: NextRequest) {
         execution_time_ms: totalTime,
       },
     });
-
   } catch (error) {
-    console.error('Error in market scan cron:', error);
-
+    console.error('[v0] Error in market scan cron:', error);
     return NextResponse.json(
-      { success: false, error: 'Cron job failed', details: String(error) },
+      { 
+        success: false, 
+        error: 'Cron job failed',
+        details: String(error),
+      },
       { status: 500 }
     );
   }

@@ -1,13 +1,8 @@
-"use server";
-
-import { createServerSideClient } from '@/lib/auth-server';
+import { supabase } from '@/lib/supabase';
 import { Trade } from '@/lib/types';
 import KiteConnect from './zerodha-kiteconnect';
 import { getUserPreferences } from './market-data';
 
-/* =========================
-   CREATE TRADE
-========================= */
 export async function createTrade(
   signalId: string,
   strategyId: string,
@@ -16,8 +11,6 @@ export async function createTrade(
   quantity: number,
   notes?: string
 ): Promise<Trade | null> {
-  const supabase = await createServerSideClient();
-
   try {
     const { data, error } = await supabase
       .from('trades')
@@ -37,17 +30,16 @@ export async function createTrade(
       .single();
 
     if (error) throw error;
-
-    return data ?? null;
+    return data || null;
   } catch (error) {
     console.error('Error creating trade:', error);
     return null;
   }
 }
 
-/* =========================
-   PLACE ORDER (ZERODHA)
-========================= */
+/**
+ * Place an actual order through Zerodha KiteConnect
+ */
 export async function placeOrder(
   symbol: string,
   quantity: number,
@@ -62,7 +54,7 @@ export async function placeOrder(
     if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
       return {
         success: false,
-        error: 'Zerodha credentials not configured.',
+        error: 'Zerodha credentials not configured. Please configure in settings.',
       };
     }
 
@@ -80,47 +72,43 @@ export async function placeOrder(
       order_type: orderType,
       quantity,
       price: orderType === 'LIMIT' ? price : undefined,
-      trigger_price:
-        orderType === 'STOPLIMIT' || orderType === 'STOPMARKET'
-          ? triggerPrice
-          : undefined,
+      trigger_price: orderType === 'STOPLIMIT' || orderType === 'STOPMARKET' ? triggerPrice : undefined,
       product: 'MIS',
       variety: 'regular',
       validity: 'DAY',
     });
 
-    return { success: true, orderId: order.order_id };
+    return {
+      success: true,
+      orderId: order.order_id,
+    };
   } catch (error) {
     console.error('Error placing order:', error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Order failed',
+      error: error instanceof Error ? error.message : 'Failed to place order',
     };
   }
 }
 
-/* =========================
-   ZERODHA DATA
-========================= */
-async function getKiteInstance() {
-  const prefs = await getUserPreferences();
-
-  if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
-    return null;
-  }
-
-  return new KiteConnect({
-    api_key: prefs.zerodha_api_key,
-    api_secret: '',
-    access_token: prefs.zerodha_access_token,
-    user_id: prefs.zerodha_user_id || '',
-  });
-}
-
-export async function getZerodhaPositions() {
+/**
+ * Get current Zerodha positions
+ */
+export async function getZerodhaPositions(): Promise<any[]> {
   try {
-    const kite = await getKiteInstance();
-    if (!kite) return [];
+    const prefs = await getUserPreferences();
+
+    if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
+      return [];
+    }
+
+    const kite = new KiteConnect({
+      api_key: prefs.zerodha_api_key,
+      api_secret: '',
+      access_token: prefs.zerodha_access_token,
+      user_id: prefs.zerodha_user_id || '',
+    });
+
     return await kite.getPositions();
   } catch (error) {
     console.error('Error fetching positions:', error);
@@ -128,10 +116,24 @@ export async function getZerodhaPositions() {
   }
 }
 
-export async function getZerodhaHoldings() {
+/**
+ * Get Zerodha holdings
+ */
+export async function getZerodhaHoldings(): Promise<any[]> {
   try {
-    const kite = await getKiteInstance();
-    if (!kite) return [];
+    const prefs = await getUserPreferences();
+
+    if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
+      return [];
+    }
+
+    const kite = new KiteConnect({
+      api_key: prefs.zerodha_api_key,
+      api_secret: '',
+      access_token: prefs.zerodha_access_token,
+      user_id: prefs.zerodha_user_id || '',
+    });
+
     return await kite.getHoldings();
   } catch (error) {
     console.error('Error fetching holdings:', error);
@@ -139,10 +141,24 @@ export async function getZerodhaHoldings() {
   }
 }
 
-export async function getAccountSummary() {
+/**
+ * Get account summary with margins
+ */
+export async function getAccountSummary(): Promise<any> {
   try {
-    const kite = await getKiteInstance();
-    if (!kite) return null;
+    const prefs = await getUserPreferences();
+
+    if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
+      return null;
+    }
+
+    const kite = new KiteConnect({
+      api_key: prefs.zerodha_api_key,
+      api_secret: '',
+      access_token: prefs.zerodha_access_token,
+      user_id: prefs.zerodha_user_id || '',
+    });
+
     return await kite.getAccountSummary();
   } catch (error) {
     console.error('Error fetching account summary:', error);
@@ -150,16 +166,12 @@ export async function getAccountSummary() {
   }
 }
 
-/* =========================
-   CLOSE TRADE
-========================= */
 export async function closeTrade(
   tradeId: string,
   exitPrice: number
 ): Promise<Trade | null> {
-  const supabase = await createServerSideClient();
-
   try {
+    // Fetch the trade to calculate P&L
     const { data: tradeData, error: fetchError } = await supabase
       .from('trades')
       .select('*')
@@ -169,13 +181,9 @@ export async function closeTrade(
     if (fetchError) throw fetchError;
     if (!tradeData) throw new Error('Trade not found');
 
-    const profitLoss =
-      (exitPrice - tradeData.entry_price) * tradeData.quantity;
-
-    const profitLossPercentage =
-      ((exitPrice - tradeData.entry_price) /
-        tradeData.entry_price) *
-      100;
+    const trade = tradeData as Trade;
+    const profitLoss = (exitPrice - trade.entry_price) * trade.quantity;
+    const profitLossPercentage = ((exitPrice - trade.entry_price) / trade.entry_price) * 100;
 
     const { data, error } = await supabase
       .from('trades')
@@ -191,20 +199,14 @@ export async function closeTrade(
       .single();
 
     if (error) throw error;
-
-    return data ?? null;
+    return data || null;
   } catch (error) {
     console.error('Error closing trade:', error);
     return null;
   }
 }
 
-/* =========================
-   FETCH TRADES
-========================= */
-export async function getTrade(tradeId: string) {
-  const supabase = await createServerSideClient();
-
+export async function getTrade(tradeId: string): Promise<Trade | null> {
   try {
     const { data, error } = await supabase
       .from('trades')
@@ -213,65 +215,76 @@ export async function getTrade(tradeId: string) {
       .single();
 
     if (error && error.code !== 'PGRST116') throw error;
-
-    return data ?? null;
+    return data || null;
   } catch (error) {
     console.error('Error fetching trade:', error);
     return null;
   }
 }
 
-async function fetchTrades(
-  status?: 'open' | 'closed',
-  strategyId?: string
-) {
-  const supabase = await createServerSideClient();
-
-  let query = supabase
-    .from('trades')
-    .select('*')
-    .order('entry_timestamp', { ascending: false });
-
-  if (status) query = query.eq('status', status);
-  if (strategyId) query = query.eq('strategy_id', strategyId);
-
-  const { data, error } = await query;
-
-  if (error) throw error;
-
-  return data ?? [];
-}
-
-export async function getOpenTrades(strategyId?: string) {
+export async function getOpenTrades(strategyId?: string): Promise<Trade[]> {
   try {
-    return await fetchTrades('open', strategyId);
+    let query = supabase
+      .from('trades')
+      .select('*')
+      .eq('status', 'open')
+      .order('entry_timestamp', { ascending: false });
+
+    if (strategyId) {
+      query = query.eq('strategy_id', strategyId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching open trades:', error);
     return [];
   }
 }
 
-export async function getClosedTrades(strategyId?: string) {
+export async function getClosedTrades(strategyId?: string): Promise<Trade[]> {
   try {
-    return await fetchTrades('closed', strategyId);
+    let query = supabase
+      .from('trades')
+      .select('*')
+      .eq('status', 'closed')
+      .order('exit_timestamp', { ascending: false });
+
+    if (strategyId) {
+      query = query.eq('strategy_id', strategyId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching closed trades:', error);
     return [];
   }
 }
 
-export async function getAllTrades(strategyId?: string) {
+export async function getAllTrades(strategyId?: string): Promise<Trade[]> {
   try {
-    return await fetchTrades(undefined, strategyId);
+    let query = supabase
+      .from('trades')
+      .select('*')
+      .order('entry_timestamp', { ascending: false });
+
+    if (strategyId) {
+      query = query.eq('strategy_id', strategyId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching trades:', error);
     return [];
   }
 }
 
-export async function getTradesBySymbol(symbol: string) {
-  const supabase = await createServerSideClient();
-
+export async function getTradesBySymbol(symbol: string): Promise<Trade[]> {
   try {
     const { data, error } = await supabase
       .from('trades')
@@ -280,22 +293,18 @@ export async function getTradesBySymbol(symbol: string) {
       .order('entry_timestamp', { ascending: false });
 
     if (error) throw error;
-
-    return data ?? [];
+    return data || [];
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching trades by symbol:', error);
     return [];
   }
 }
 
-/* =========================
-   PORTFOLIO STATS
-========================= */
 export async function calculatePortfolioStats(strategyId?: string) {
   try {
     const closedTrades = await getClosedTrades(strategyId);
 
-    if (!closedTrades.length) {
+    if (closedTrades.length === 0) {
       return {
         total_trades: 0,
         winning_trades: 0,
@@ -307,31 +316,24 @@ export async function calculatePortfolioStats(strategyId?: string) {
       };
     }
 
-    const winning = closedTrades.filter(t => (t.profit_loss || 0) > 0);
-    const losing = closedTrades.filter(t => (t.profit_loss || 0) < 0);
-
-    const totalPL = closedTrades.reduce(
-      (sum, t) => sum + (t.profit_loss || 0),
-      0
-    );
+    const winningTrades = closedTrades.filter(t => (t.profit_loss || 0) > 0);
+    const losingTrades = closedTrades.filter(t => (t.profit_loss || 0) < 0);
+    const totalPL = closedTrades.reduce((sum, t) => sum + (t.profit_loss || 0), 0);
+    const avgProfit = winningTrades.length > 0 
+      ? winningTrades.reduce((sum, t) => sum + (t.profit_loss || 0), 0) / winningTrades.length
+      : 0;
+    const avgLoss = losingTrades.length > 0
+      ? Math.abs(losingTrades.reduce((sum, t) => sum + (t.profit_loss || 0), 0)) / losingTrades.length
+      : 0;
 
     return {
       total_trades: closedTrades.length,
-      winning_trades: winning.length,
-      losing_trades: losing.length,
-      win_rate: (winning.length / closedTrades.length) * 100,
+      winning_trades: winningTrades.length,
+      losing_trades: losingTrades.length,
+      win_rate: (winningTrades.length / closedTrades.length) * 100,
       total_profit_loss: totalPL,
-      average_profit:
-        winning.length > 0
-          ? winning.reduce((s, t) => s + (t.profit_loss || 0), 0) /
-          winning.length
-          : 0,
-      average_loss:
-        losing.length > 0
-          ? Math.abs(
-            losing.reduce((s, t) => s + (t.profit_loss || 0), 0)
-          ) / losing.length
-          : 0,
+      average_profit: avgProfit,
+      average_loss: avgLoss,
     };
   } catch (error) {
     console.error('Error calculating portfolio stats:', error);

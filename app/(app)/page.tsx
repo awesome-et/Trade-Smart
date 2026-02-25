@@ -68,7 +68,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Link href="/strategies">
+              <Link href="/strategies/new">
                 <Button variant="outline" className="w-full">
                   Create Strategy
                 </Button>

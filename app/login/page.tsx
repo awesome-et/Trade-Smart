@@ -24,24 +24,17 @@ export default function LoginPage() {
       const { data, error: authError } = await signIn(email, password)
 
       if (authError) {
-        console.error('[v0] Login error:', authError)
-        setError(authError.message || 'Failed to sign in. Please try again.')
+        setError(authError.message || 'Failed to sign in')
         return
       }
 
       if (data?.session) {
-        // Wait a moment for session to be established
-        setTimeout(() => {
-          router.push('/')
-          router.refresh()
-        }, 500)
+        router.push('/')
       } else {
         setError('No session created. Please try again.')
       }
     } catch (err: any) {
-      console.error('[v0] Login exception:', err)
-      const errorMessage = err?.message || err?.toString?.() || 'An error occurred during login'
-      setError(errorMessage)
+      setError(err.message || 'An error occurred during login')
     } finally {
       setLoading(false)
     }
@@ -103,20 +96,8 @@ export default function LoginPage() {
           </div>
 
           {error && (
-            <div className="space-y-2">
-              <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm">
-                {error}
-              </div>
-              {error.includes('fetch') && (
-                <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-600 text-xs">
-                  <strong>Troubleshooting:</strong> If you see "Failed to fetch", try:
-                  <ul className="mt-2 space-y-1 list-disc list-inside">
-                    <li>Verify Supabase URL and API key are correct</li>
-                    <li>Check your internet connection</li>
-                    <li>Try refreshing the page (Ctrl+Shift+R)</li>
-                  </ul>
-                </div>
-              )}
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm">
+              {error}
             </div>
           )}
 

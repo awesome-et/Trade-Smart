@@ -1,6 +1,6 @@
+import { supabase } from '@/lib/supabase';
 import { ZerodhaQuote, MarketDataPoint, UserPreferences } from '@/lib/types';
 import KiteConnect from './zerodha-kiteconnect';
-import { createServerSideClient } from '@/lib/auth-server';
 
 // Indian stock symbols
 const INDIAN_STOCKS = [
@@ -13,8 +13,6 @@ let kiteInstance: KiteConnect | null = null;
 
 export async function getUserPreferences(): Promise<UserPreferences | null> {
   try {
-    const supabase = await createServerSideClient();
-
     const { data, error } = await supabase
       .from('user_preferences')
       .select('*')
@@ -29,31 +27,24 @@ export async function getUserPreferences(): Promise<UserPreferences | null> {
   }
 }
 
-export async function saveUserPreferences(
-  preferences: Partial<UserPreferences>
-) {
+export async function saveUserPreferences(preferences: Partial<UserPreferences>) {
   try {
-    const supabase = await createServerSideClient();
     const existing = await getUserPreferences();
-
+    
     if (existing) {
       const { error } = await supabase
         .from('user_preferences')
         .update(preferences)
         .eq('id', existing.id);
-
       if (error) throw error;
     } else {
       const { error } = await supabase
         .from('user_preferences')
         .insert([preferences]);
-
       if (error) throw error;
     }
-
-    // Reset Kite instance if credentials changed
+    // Reset kite instance if credentials changed
     kiteInstance = null;
-
     return { success: true };
   } catch (error) {
     console.error('Error saving user preferences:', error);
@@ -66,14 +57,13 @@ async function getKiteInstance(): Promise<KiteConnect | null> {
     if (kiteInstance) return kiteInstance;
 
     const prefs = await getUserPreferences();
-
     if (!prefs?.zerodha_api_key || !prefs?.zerodha_access_token) {
       return null;
     }
 
     kiteInstance = new KiteConnect({
       api_key: prefs.zerodha_api_key,
-      api_secret: '',
+      api_secret: '', // Not needed for API calls, only for OAuth
       access_token: prefs.zerodha_access_token,
       user_id: prefs.zerodha_user_id || '',
     });
@@ -85,12 +75,10 @@ async function getKiteInstance(): Promise<KiteConnect | null> {
   }
 }
 
-export async function fetchMarketData(
-  symbols: string[]
-): Promise<ZerodhaQuote[]> {
+export async function fetchMarketData(symbols: string[]): Promise<ZerodhaQuote[]> {
   try {
     const kite = await getKiteInstance();
-
+    
     if (!kite) {
       console.warn('Zerodha not configured, using mock data');
       return generateMockQuotes(symbols);
@@ -98,7 +86,6 @@ export async function fetchMarketData(
 
     try {
       const quotes = await kite.getQuotes(symbols);
-
       return symbols.map(symbol => {
         const quote = quotes[symbol];
         return {
@@ -112,7 +99,7 @@ export async function fetchMarketData(
         };
       });
     } catch (error) {
-      console.error('Kite API failed, falling back to mock data:', error);
+      console.error('KiteConnect API error, falling back to mock data:', error);
       return generateMockQuotes(symbols);
     }
   } catch (error) {
@@ -121,9 +108,7 @@ export async function fetchMarketData(
   }
 }
 
-export function generateMockQuotes(
-  symbols: string[]
-): ZerodhaQuote[] {
+export function generateMockQuotes(symbols: string[]): ZerodhaQuote[] {
   return symbols.map(symbol => ({
     symbol,
     last_price: Math.random() * 10000 + 100,
@@ -135,9 +120,7 @@ export function generateMockQuotes(
   }));
 }
 
-export function calculateTechnicalIndicators(
-  quotes: ZerodhaQuote[]
-): MarketDataPoint[] {
+export function calculateTechnicalIndicators(quotes: ZerodhaQuote[]): MarketDataPoint[] {
   return quotes.map(quote => ({
     symbol: quote.symbol,
     price: quote.last_price,
@@ -153,13 +136,15 @@ export function calculateTechnicalIndicators(
   }));
 }
 
-function calculateRSI(quote: ZerodhaQuote): number {
+function calculateRSI(quote: ZerodhaQuote, period = 14): number {
+  // Simplified RSI calculation - in production, use full historical data
   const change = quote.close - quote.open;
   const percentChange = (change / quote.open) * 100;
   return 50 + percentChange;
 }
 
-function calculateMACD(quote: ZerodhaQuote) {
+function calculateMACD(quote: ZerodhaQuote): { value: number; signal: number; histogram: number } {
+  // Simplified MACD - in production, use full historical data with EMA
   const momentum = quote.close - quote.open;
   return {
     value: momentum,
@@ -168,10 +153,9 @@ function calculateMACD(quote: ZerodhaQuote) {
   };
 }
 
-function calculateBollingerBands(quote: ZerodhaQuote) {
+function calculateBollingerBands(quote: ZerodhaQuote): { upper: number; middle: number; lower: number } {
   const middle = (quote.high + quote.low) / 2;
   const stdDev = (quote.high - quote.low) * 0.15;
-
   return {
     upper: middle + 2 * stdDev,
     middle,
@@ -179,15 +163,18 @@ function calculateBollingerBands(quote: ZerodhaQuote) {
   };
 }
 
-function calculateSMA(quote: ZerodhaQuote, _period: number): number {
+function calculateSMA(quote: ZerodhaQuote, period: number): number {
+  // Simplified SMA - in production, use historical data
   return quote.close;
 }
 
 function calculateATR(quote: ZerodhaQuote): number {
+  // Simplified ATR - in production, calculate from true range
   return (quote.high - quote.low) * 0.5;
 }
 
 function calculateMomentum(quote: ZerodhaQuote): number {
+  // Simplified momentum - in production, compare to previous candles
   return quote.close - quote.open;
 }
 
