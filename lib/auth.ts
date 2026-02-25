@@ -39,9 +39,9 @@ export async function signIn(email: string, password: string) {
     return { data, error }
   } catch (err) {
     console.error('[v0] Sign in exception:', err)
-    return { 
-      data: null, 
-      error: err instanceof Error ? err : new Error('Failed to sign in. Please check your connection and try again.') 
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to sign in. Please check your connection and try again.')
     }
   }
 }
