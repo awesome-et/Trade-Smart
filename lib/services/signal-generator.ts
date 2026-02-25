@@ -1,29 +1,31 @@
-import { supabase } from '@/lib/supabase';
-import { Signal, MarketScan, StrategyEvaluationResult } from '@/lib/types';
+"use server";
+
+import { createServerSideClient } from '@/lib/auth-server';
+import { Signal, StrategyEvaluationResult } from '@/lib/types';
 
 export async function generateSignals(
   strategyId: string,
   marketScanId: string,
   evaluationResults: StrategyEvaluationResult[]
 ): Promise<Signal[]> {
+  const supabase = await createServerSideClient();
+
   try {
     const signals: Omit<Signal, 'id' | 'created_at'>[] = evaluationResults
-      .filter(result => result.signal_type !== null)
-      .map(result => ({
+      .filter((result) => result.signal_type !== null)
+      .map((result) => ({
         strategy_id: strategyId,
         market_scan_id: marketScanId,
         symbol: result.symbol,
         signal_type: result.signal_type!,
-        price: 0, // Will be fetched from market data
+        price: 0,
         signal_strength: result.signal_strength,
         timestamp: result.timestamp,
         indicators: result.indicators,
         status: 'active' as const,
       }));
 
-    if (signals.length === 0) {
-      return [];
-    }
+    if (!signals.length) return [];
 
     const { data, error } = await supabase
       .from('signals')
@@ -31,14 +33,19 @@ export async function generateSignals(
       .select();
 
     if (error) throw error;
-    return data || [];
+
+    return data ?? [];
   } catch (error) {
     console.error('Error generating signals:', error);
     throw error;
   }
 }
 
-export async function getActiveSignals(strategyId?: string): Promise<Signal[]> {
+export async function getActiveSignals(
+  strategyId?: string
+): Promise<Signal[]> {
+  const supabase = await createServerSideClient();
+
   try {
     let query = supabase
       .from('signals')
@@ -51,15 +58,21 @@ export async function getActiveSignals(strategyId?: string): Promise<Signal[]> {
     }
 
     const { data, error } = await query;
+
     if (error) throw error;
-    return data || [];
+
+    return data ?? [];
   } catch (error) {
     console.error('Error fetching active signals:', error);
     return [];
   }
 }
 
-export async function getSignalsBySymbol(symbol: string): Promise<Signal[]> {
+export async function getSignalsBySymbol(
+  symbol: string
+): Promise<Signal[]> {
+  const supabase = await createServerSideClient();
+
   try {
     const { data, error } = await supabase
       .from('signals')
@@ -69,7 +82,8 @@ export async function getSignalsBySymbol(symbol: string): Promise<Signal[]> {
       .order('timestamp', { ascending: false });
 
     if (error) throw error;
-    return data || [];
+
+    return data ?? [];
   } catch (error) {
     console.error('Error fetching signals for symbol:', error);
     return [];
@@ -78,8 +92,10 @@ export async function getSignalsBySymbol(symbol: string): Promise<Signal[]> {
 
 export async function updateSignalStatus(
   signalId: string,
-  status: string
+  status: 'active' | 'expired' | 'executed'
 ): Promise<boolean> {
+  const supabase = await createServerSideClient();
+
   try {
     const { error } = await supabase
       .from('signals')
@@ -87,6 +103,7 @@ export async function updateSignalStatus(
       .eq('id', signalId);
 
     if (error) throw error;
+
     return true;
   } catch (error) {
     console.error('Error updating signal status:', error);
@@ -94,18 +111,26 @@ export async function updateSignalStatus(
   }
 }
 
-export async function expireOldSignals(hours: number = 24): Promise<number> {
-  try {
-    const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+export async function expireOldSignals(
+  hours: number = 24
+): Promise<number> {
+  const supabase = await createServerSideClient();
 
-    const { error, count } = await supabase
+  try {
+    const cutoffTime = new Date(
+      Date.now() - hours * 60 * 60 * 1000
+    ).toISOString();
+
+    const { data, error } = await supabase
       .from('signals')
       .update({ status: 'expired' })
       .eq('status', 'active')
-      .lt('timestamp', cutoffTime);
+      .lt('timestamp', cutoffTime)
+      .select('id');
 
     if (error) throw error;
-    return count || 0;
+
+    return data?.length ?? 0;
   } catch (error) {
     console.error('Error expiring old signals:', error);
     return 0;
