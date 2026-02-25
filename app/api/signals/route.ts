@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { createServerSideClient } from '@/lib/auth-server';
 import { getActiveSignals, getSignalsBySymbol, updateSignalStatus, expireOldSignals } from '@/lib/services/signal-generator';
 
 export async function GET(request: NextRequest) {
@@ -33,6 +33,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  const supabase = await createServerSideClient();
+
   try {
     const body = await request.json();
     const { signal_id, status } = body;
@@ -61,14 +63,17 @@ export async function PATCH(request: NextRequest) {
       success: true,
       data,
     });
+
   } catch (error) {
     console.error('Error updating signal:', error);
+
     return NextResponse.json(
       { success: false, error: 'Failed to update signal' },
       { status: 500 }
     );
   }
 }
+
 
 export async function POST(request: NextRequest) {
   try {

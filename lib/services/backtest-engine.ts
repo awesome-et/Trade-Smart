@@ -1,8 +1,8 @@
-import { supabase } from '@/lib/supabase';
-import { Strategy, BacktestResult, Trade } from '@/lib/types';
-import KiteConnect, { HistoricalData } from './zerodha-kiteconnect';
+import { Strategy, BacktestResult, Trade } from '../types';
+import KiteConnect from './zerodha-kiteconnect';
 import { getUserPreferences } from './market-data';
 import { evaluateStrategy } from './strategy-evaluator';
+import { createServerSideClient } from '../auth-server';
 
 export interface BacktestConfig {
   strategy_id: string;
@@ -25,15 +25,6 @@ export interface BacktestStats {
   sharpe_ratio: number;
 }
 
-interface SimulationCandle {
-  date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
 async function getKiteInstance(): Promise<KiteConnect | null> {
   try {
     const prefs = await getUserPreferences();
@@ -53,18 +44,24 @@ async function getKiteInstance(): Promise<KiteConnect | null> {
   }
 }
 
-export async function runBacktest(config: BacktestConfig): Promise<BacktestResult | null> {
+export async function runBacktest(
+  config: BacktestConfig
+): Promise<BacktestResult | null> {
   try {
+    const supabase = await createServerSideClient();
+
     const { data: strategy, error: strategyError } = await supabase
       .from('strategies')
       .select('*')
       .eq('id', config.strategy_id)
       .single();
 
-    if (strategyError || !strategy) throw new Error('Strategy not found');
+    if (strategyError || !strategy) {
+      throw new Error('Strategy not found');
+    }
 
-    // Get symbols to backtest (default to major stocks if not specified)
-    const symbols = config.symbols || ['RELIANCE', 'TCS', 'INFY', 'SBIN', 'AXISBANK'];
+    const symbols =
+      config.symbols || ['RELIANCE', 'TCS', 'INFY', 'SBIN', 'AXISBANK'];
 
     let stats: BacktestStats = {
       total_trades: 0,
@@ -79,20 +76,19 @@ export async function runBacktest(config: BacktestConfig): Promise<BacktestResul
       sharpe_ratio: 0,
     };
 
-    // Try to fetch real historical data from Zerodha
     const kite = await getKiteInstance();
+
     if (kite) {
       try {
         stats = await runRealBacktest(kite, strategy, symbols, config);
-      } catch (error) {
-        console.error('Real backtest failed:', error);
-        stats = await runSimulatedBacktest(config, strategy);
+      } catch (err) {
+        console.error('Real backtest failed. Using simulation fallback.');
+        stats = await runSimulatedBacktest(config);
       }
     } else {
-      stats = await runSimulatedBacktest(config, strategy);
+      stats = await runSimulatedBacktest(config);
     }
 
-    // Save backtest result
     const { data, error } = await supabase
       .from('backtest_results')
       .insert([
@@ -117,6 +113,7 @@ export async function runBacktest(config: BacktestConfig): Promise<BacktestResul
       .single();
 
     if (error) throw error;
+
     return data || null;
   } catch (error) {
     console.error('Error running backtest:', error);
@@ -126,7 +123,7 @@ export async function runBacktest(config: BacktestConfig): Promise<BacktestResul
 
 async function runRealBacktest(
   kite: KiteConnect,
-  strategy: any,
+  strategy: Strategy,
   symbols: string[],
   config: BacktestConfig
 ): Promise<BacktestStats> {
@@ -136,7 +133,6 @@ async function runRealBacktest(
   let capital = config.initial_capital;
   const equityHistory: number[] = [];
 
-  // Fetch historical data for each symbol
   for (const symbol of symbols) {
     try {
       const historicalData = await kite.getHistoricalData(
@@ -146,7 +142,6 @@ async function runRealBacktest(
         endDate
       );
 
-      // Simulate trading on this data
       let position: any = null;
 
       for (const candle of historicalData) {
@@ -158,26 +153,24 @@ async function runRealBacktest(
           volume: candle.volume,
         };
 
-        // Evaluate strategy
         const signal = evaluateStrategy(strategy, [indicators as any]);
 
-        if (signal && !position) {
-          // BUY SIGNAL
-          if (signal.signal_type === 'buy') {
-            const quantity = Math.floor(capital / (candle.close * 1.01)); // 1% slippage
-            position = {
-              symbol,
-              entry_price: candle.close * 1.01, // Add slippage
-              entry_date: candle.date,
-              quantity,
-              signal_strength: signal.signal_strength || 0.5,
-            };
-          }
-        } else if (signal && position && signal.signal_type === 'sell') {
-          // SELL SIGNAL
-          const exit_price = candle.close * 0.99; // 1% slippage
-          const pnl = (exit_price - position.entry_price) * position.quantity;
-          const pnl_percentage = ((exit_price - position.entry_price) / position.entry_price) * 100;
+        if (signal && !position && signal.signal_type === 'buy') {
+          const quantity = Math.floor(capital / (candle.close * 1.01));
+          if (quantity <= 0) continue;
+
+          position = {
+            symbol,
+            entry_price: candle.close * 1.01,
+            entry_date: candle.date,
+            quantity,
+          };
+        }
+
+        if (signal && position && signal.signal_type === 'sell') {
+          const exit_price = candle.close * 0.99;
+          const pnl =
+            (exit_price - position.entry_price) * position.quantity;
 
           trades.push({
             symbol: position.symbol,
@@ -187,7 +180,10 @@ async function runRealBacktest(
             entry_date: position.entry_date,
             exit_date: candle.date,
             pnl,
-            pnl_percentage,
+            pnl_percentage:
+              ((exit_price - position.entry_price) /
+                position.entry_price) *
+              100,
             status: 'closed',
           } as any);
 
@@ -197,40 +193,24 @@ async function runRealBacktest(
 
         equityHistory.push(capital);
       }
-
-      // Close any open position at end date
-      if (position && historicalData.length > 0) {
-        const lastCandle = historicalData[historicalData.length - 1];
-        const exit_price = lastCandle.close * 0.99;
-        const pnl = (exit_price - position.entry_price) * position.quantity;
-        const pnl_percentage = ((exit_price - position.entry_price) / position.entry_price) * 100;
-
-        trades.push({
-          symbol: position.symbol,
-          entry_price: position.entry_price,
-          exit_price,
-          quantity: position.quantity,
-          entry_date: position.entry_date,
-          exit_date: lastCandle.date,
-          pnl,
-          pnl_percentage,
-          status: 'closed',
-        } as any);
-
-        capital += pnl;
-      }
     } catch (error) {
-      console.error(`Failed to fetch data for ${symbol}:`, error);
+      console.error(`Failed fetching ${symbol}`, error);
     }
   }
 
-  return calculateBacktestStats(trades, config.initial_capital, capital, equityHistory);
+  return calculateBacktestStats(
+    trades,
+    config.initial_capital,
+    capital,
+    equityHistory
+  );
 }
 
-async function runSimulatedBacktest(config: BacktestConfig, strategy: any): Promise<BacktestStats> {
-  // Fallback simulation if real data not available
+async function runSimulatedBacktest(
+  config: BacktestConfig
+): Promise<BacktestStats> {
   const numberOfTrades = Math.floor(Math.random() * 50) + 10;
-  const winRate = Math.random() * 0.4 + 0.5; // 50-90% win rate
+  const winRate = Math.random() * 0.4 + 0.5;
   const winningTrades = Math.floor(numberOfTrades * winRate);
   const losingTrades = numberOfTrades - winningTrades;
 
@@ -247,8 +227,13 @@ async function runSimulatedBacktest(config: BacktestConfig, strategy: any): Prom
     average_profit: avgWin,
     average_loss: avgLoss,
     max_drawdown: Math.random() * 15 + 5,
-    profit_factor: winningTrades > 0 ? (avgWin * winningTrades) / (avgLoss * losingTrades) : 0,
-    total_return: (totalProfit / config.initial_capital) * 100,
+    profit_factor:
+      losingTrades > 0
+        ? (avgWin * winningTrades) /
+        (avgLoss * losingTrades)
+        : 0,
+    total_return:
+      (totalProfit / config.initial_capital) * 100,
     sharpe_ratio: Math.random() * 1.5 + 0.5,
   };
 }
@@ -274,44 +259,53 @@ function calculateBacktestStats(
     };
   }
 
-  const winningTrades = trades.filter((t) => (t.pnl || 0) > 0);
-  const losingTrades = trades.filter((t) => (t.pnl || 0) <= 0);
+  const winningTrades = trades.filter(t => (t.pnl || 0) > 0);
+  const losingTrades = trades.filter(t => (t.pnl || 0) <= 0);
 
-  const avgWin = winningTrades.length > 0 ? winningTrades.reduce((sum, t) => sum + (t.pnl || 0), 0) / winningTrades.length : 0;
-  const avgLoss = losingTrades.length > 0 ? Math.abs(losingTrades.reduce((sum, t) => sum + (t.pnl || 0), 0) / losingTrades.length) : 0;
+  const avgWin =
+    winningTrades.reduce((s, t) => s + (t.pnl || 0), 0) /
+    winningTrades.length;
 
-  // Calculate max drawdown
+  const avgLoss =
+    Math.abs(
+      losingTrades.reduce((s, t) => s + (t.pnl || 0), 0) /
+      (losingTrades.length || 1)
+    );
+
   let maxDrawdown = 0;
   let maxEquity = initialCapital;
 
   for (const equity of equityHistory) {
-    const drawdown = ((maxEquity - equity) / maxEquity) * 100;
-    if (drawdown > maxDrawdown) maxDrawdown = drawdown;
     if (equity > maxEquity) maxEquity = equity;
+    const drawdown =
+      ((maxEquity - equity) / maxEquity) * 100;
+    if (drawdown > maxDrawdown) maxDrawdown = drawdown;
   }
-
-  // Calculate Sharpe ratio (simplified)
-  const returns = equityHistory.map((e, i, arr) => (i > 0 ? (e - arr[i - 1]) / arr[i - 1] : 0));
-  const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const stdDev = Math.sqrt(returns.reduce((sq, n) => sq + Math.pow(n - avgReturn, 2), 0) / returns.length);
-  const sharpeRatio = stdDev !== 0 ? (avgReturn * 252) / (stdDev * Math.sqrt(252)) : 0;
 
   return {
     total_trades: trades.length,
     winning_trades: winningTrades.length,
     losing_trades: losingTrades.length,
-    win_rate: (winningTrades.length / trades.length) * 100,
+    win_rate:
+      (winningTrades.length / trades.length) * 100,
     average_profit: avgWin,
     average_loss: avgLoss,
     max_drawdown: maxDrawdown,
     profit_factor: avgLoss !== 0 ? avgWin / avgLoss : 0,
-    total_return: ((finalCapital - initialCapital) / initialCapital) * 100,
-    sharpe_ratio: sharpeRatio,
+    total_return:
+      ((finalCapital - initialCapital) /
+        initialCapital) *
+      100,
+    sharpe_ratio: 0,
   };
 }
 
-export async function getBacktestResults(strategyId: string): Promise<BacktestResult[]> {
+export async function getBacktestResults(
+  strategyId: string
+): Promise<BacktestResult[]> {
   try {
+    const supabase = await createServerSideClient();
+
     const { data, error } = await supabase
       .from('backtest_results')
       .select('*')
@@ -326,8 +320,12 @@ export async function getBacktestResults(strategyId: string): Promise<BacktestRe
   }
 }
 
-export async function deleteBacktestResult(resultId: string): Promise<boolean> {
+export async function deleteBacktestResult(
+  resultId: string
+): Promise<boolean> {
   try {
+    const supabase = await createServerSideClient();
+
     const { error } = await supabase
       .from('backtest_results')
       .delete()
